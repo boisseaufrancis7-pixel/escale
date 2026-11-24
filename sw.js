@@ -1,7 +1,7 @@
 // Escale — service worker : permet d'installer l'appli et de l'ouvrir sans réseau.
 // Stratégie « réseau d'abord » : la version en ligne est toujours prise si possible,
 // la copie en cache sert seulement hors ligne.
-const CACHE = 'escale-v1';
+const CACHE = 'escale-v2';
 const SHELL = ['./', 'index.html', 'app.js', 'firebase-config.js', 'manifest.webmanifest',
   'icons/icon-192.png', 'icons/icon-512.png', 'icons/apple-touch-icon.png'];
 

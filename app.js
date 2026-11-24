@@ -86,12 +86,24 @@ async function locate(t,it){const q=geoQuery(t,it);if(!q)return;const g=await ge
 async function locateTrip(t){if(t.geo===t.dest)return;const g=await geocode(t.dest);const cur=tripMap[t.id];if(!cur)return;Save.trip({...cur,geo:t.dest,lat:g?g.lat:null,lng:g?g.lng:null})}
 
 /* ---------- Calculs d'argent (comme Moitié, avec devises) ---------- */
-const toHome=(t,cents,cur)=>cur===t.home?cents:Math.round(cents*(t.rate||1));
+const toHome=(t,cents,cur,rt)=>cur===t.home?cents:Math.round(cents*(rt||t.rate||1));
+const fmtRate=r=>String(Math.round(r*10000)/10000).replace('.',',');
+async function fetchRate(from,to){if(from===to)return 1;
+ try{const r=await fetch('https://api.frankfurter.app/latest?from='+from+'&to='+to);if(r.ok){const j=await r.json();if(j&&j.rates&&j.rates[to])return j.rates[to]}}catch(e){}
+ try{const r=await fetch('https://open.er-api.com/v6/latest/'+from);if(r.ok){const j=await r.json();if(j&&j.rates&&j.rates[to])return j.rates[to]}}catch(e){}
+ return null}
+const rateTried={};
+async function autoRate(t){if(!t||t.cur===t.home||t.rateAuto===false||t.rateDate===today()||rateTried[t.id])return;rateTried[t.id]=1;
+ const r=await fetchRate(t.cur,t.home);const cur=tripMap[t.id];if(!r||!cur)return;
+ Save.trip({...cur,rate:Math.round(r*10000)/10000,rateDate:today(),rateAuto:true})}
+async function sheetRate(){const s=V.sheet;if(!s||s.type!=='trip')return;const x=s.x;if(x.cur===x.home)return;
+ s.rateMsg='Recherche du taux du jour…';paintSheet();const r=await fetchRate(x.cur,x.home);if(V.sheet!==s)return;
+ if(r){x.rateTxt=fmtRate(r);x.rateDate=today();s.rateMsg='Taux du jour trouvé : 1 '+x.cur+' = '+fmtRate(r)+' '+x.home+'.'}else s.rateMsg='Taux introuvable pour le moment : entre-le à la main.';paintSheet()}
 function shares(t,e){ // parts en devise du voyage (home), par personne
  const out={};
- if(e.mode==='exact'){for(const id in e.parts||{})out[id]=toHome(t,e.parts[id],e.cur);return out}
+ if(e.mode==='exact'){for(const id in e.parts||{})out[id]=toHome(t,e.parts[id],e.cur,e.rate);return out}
  const ids=e.split||[],n=ids.length;if(!n)return out;
- const tot=toHome(t,e.amount,e.cur),base=Math.floor(tot/n);let rest=tot-base*n;
+ const tot=toHome(t,e.amount,e.cur,e.rate),base=Math.floor(tot/n);let rest=tot-base*n;
  ids.forEach(id=>{out[id]=base+(rest>0?1:0);if(rest>0)rest--});return out}
 const expHome=(t,e)=>Object.values(shares(t,e)).reduce((s,v)=>s+v,0);
 function balances(t){const b={};t.people.forEach(p=>b[p.id]=0);
@@ -127,7 +139,7 @@ const I={
 const DOCK={vol:['Vol',I.plane],hotel:['Hébergement',I.bed],auto:['Location d’auto',I.car],autre:['Autre',I.tick]};
 
 /* ---------- Vues ---------- */
-const V={tab:'plan',sub:'list',sheet:null,toast:null};
+const V={tab:null,sub:'list',sheet:null,toast:null};
 const route=()=>{const h=location.hash.slice(1);return h.startsWith('t-')?h.slice(2):''};
 const curT=()=>St.trips.find(t=>t.id===route());
 const modeLine=()=>St.mode==='fb'?'Synchronisé en direct avec les autres voyageurs.':'';
@@ -233,11 +245,73 @@ ${todos.length?'':`<button class="btn full" data-act="basics" style="margin-top:
 ${docs.length?docs.map(x=>`<button class="exp" data-act="editdoc" data-id="${esc(x.id)}"><span class="ico">${(DOCK[x.kind]||DOCK.autre)[1]}</span><span class="grow"><span class="t1">${esc(x.title)}</span><span class="sub">${esc((DOCK[x.kind]||DOCK.autre)[0])}${x.date?' · '+esc(fmtDay(x.date)):''}${x.time?' à '+esc(x.time):''}</span>${x.ref?`<span style="display:block;margin-top:4px"><span class="code">${esc(x.ref)}</span></span>`:''}</span></button>`).join('')
  :`<div class="sub" style="padding-top:8px">Garde ici tes vols, ton hébergement et tes numéros de confirmation : tout sera au même endroit à l’aéroport.</div>`}</div>`}
 
+
+/* ---------- Écran « Aujourd'hui » ---------- */
+const nowHM=()=>{const d=new Date();return String(d.getHours()).padStart(2,'0')+':'+String(d.getMinutes()).padStart(2,'0')};
+const WX={0:['Ensoleillé','sun'],1:['Plutôt ensoleillé','sun'],2:['Partiellement nuageux','part'],3:['Nuageux','cloud'],45:['Brouillard','fog'],48:['Brouillard','fog'],51:['Bruine','rain'],53:['Bruine','rain'],55:['Bruine','rain'],56:['Bruine verglaçante','rain'],57:['Bruine verglaçante','rain'],61:['Faible pluie','rain'],63:['Pluie','rain'],65:['Forte pluie','rain'],66:['Pluie verglaçante','rain'],67:['Pluie verglaçante','rain'],71:['Faible neige','snow'],73:['Neige','snow'],75:['Forte neige','snow'],77:['Neige','snow'],80:['Averses','rain'],81:['Averses','rain'],82:['Fortes averses','rain'],85:['Averses de neige','snow'],86:['Averses de neige','snow'],95:['Orages','storm'],96:['Orages et grêle','storm'],99:['Orages et grêle','storm']};
+const SV=(b,sz)=>'<svg width="'+sz+'" height="'+sz+'" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'+b+'</svg>';
+const WI={sun:'<circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/>',
+ part:'<circle cx="8" cy="8" r="3"/><path d="M8 2v1M2 8h1M3.8 3.8l.7.7M12.2 3.8l-.7.7"/><path d="M9 19h8a4 4 0 0 0 0-8 5 5 0 0 0-9.5 1.5A3.3 3.3 0 0 0 9 19z"/>',
+ cloud:'<path d="M7 18h10a4 4 0 0 0 0-8 6 6 0 0 0-11.5 2A3 3 0 0 0 7 18z"/>',
+ rain:'<path d="M7 14h10a4 4 0 0 0 0-8 6 6 0 0 0-11.5 2A3 3 0 0 0 7 14z"/><path d="M8 18l-1 3M12 18l-1 3M16 18l-1 3"/>',
+ snow:'<path d="M7 14h10a4 4 0 0 0 0-8 6 6 0 0 0-11.5 2A3 3 0 0 0 7 14z"/><path d="M8 18h.01M12 20h.01M16 18h.01M10 22h.01M14 22h.01"/>',
+ storm:'<path d="M7 14h10a4 4 0 0 0 0-8 6 6 0 0 0-11.5 2A3 3 0 0 0 7 14z"/><path d="M12 14l-2 4h4l-2 4"/>',
+ fog:'<path d="M4 10h16M6 14h12M4 18h16M7 6h10"/>'};
+const wxCache={};
+async function loadWx(t){
+ if(typeof t.lat!=='number')return;const d0=today();const key=t.id+'|'+d0+'|'+t.lat;if(wxCache[key])return;
+ const s0=d0>t.start?d0:t.start;let e0=addDays(s0,6);if(e0>t.end)e0=t.end;const lim=addDays(d0,15);if(e0>lim)e0=lim;
+ if(d0>t.end||s0>lim){wxCache[key]={none:true};return}
+ wxCache[key]={loading:true};
+ try{const u='https://api.open-meteo.com/v1/forecast?latitude='+t.lat+'&longitude='+t.lng+'&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max&timezone=auto&start_date='+s0+'&end_date='+e0;
+  const j=await (await fetch(u)).json();const dl=j.daily;
+  wxCache[key]={days:dl.time.map((d,i)=>({d,code:dl.weather_code[i],max:dl.temperature_2m_max[i],min:dl.temperature_2m_min[i],rain:dl.precipitation_probability_max[i]}))}
+ }catch(e){wxCache[key]={err:true}}
+ render()}
+function wxCard(t){
+ if(typeof t.lat!=='number')return '';const w=wxCache[t.id+'|'+today()+'|'+t.lat];
+ if(!w||w.loading)return `<div class="card sub">Chargement de la météo…</div>`;
+ if(w.none)return '';if(w.err||!w.days||!w.days.length)return `<div class="card sub">Météo indisponible pour le moment.</div>`;
+ const f=w.days[0],lab=WX[f.code]||['—','cloud'],r=x=>Math.round(x);
+ return `<div class="card wx"><div class="row"><span class="wxi">${SV(WI[lab[1]],44)}</span><div class="grow"><div class="sub">Météo à ${esc(t.dest.split(',')[0])} · ${f.d===today()?'aujourd’hui':esc(fmtDay(f.d))}</div>
+<div class="big-n">${r(f.max)}° <span class="sub" style="font-size:16px">/ ${r(f.min)}°</span></div><div>${lab[0]}${f.rain!=null?' · '+f.rain+' % de risque de pluie':''}</div></div></div>
+${w.days.length>1?`<div class="wxs">${w.days.slice(1).map(x=>{const l=WX[x.code]||['—','cloud'];return `<div><span class="sub">${esc(fmtDay(x.d).split(' ')[0])}</span>${SV(WI[l[1]],22)}<b>${r(x.max)}°</b><span class="sub">${r(x.min)}°</span></div>`}).join('')}</div>`:''}</div>`}
+function nextUp(t){
+ const d0=today(),n=nowHM(),c=[];
+ items(t,'act').forEach(a=>{if(a.day&&a.time&&!a.done&&(a.day>d0||(a.day===d0&&a.time>=n)))c.push({when:a.day+'T'+a.time,day:a.day,time:a.time,title:a.title,where:a.place?a.place+', '+t.dest:'',place:a.place,kind:'act'})});
+ items(t,'doc').forEach(x=>{if(x.date&&(x.date>d0||(x.date===d0&&(x.time||'23:59')>=n)))c.push({when:x.date+'T'+(x.time||'00:00'),day:x.date,time:x.time,title:x.title,where:x.addr||'',place:x.addr,ref:x.ref,kind:'doc'})});
+ c.sort((a,b)=>a.when.localeCompare(b.when));return c[0]}
+function untilTxt(nx){const ms=new Date(nx.when)-new Date();if(isNaN(ms))return '';const m=Math.round(ms/60000);
+ if(nx.day===today())return m<1?'maintenant':m<60?'dans '+m+' min':'dans '+Math.floor(m/60)+' h'+(m%60?' '+String(m%60).padStart(2,'0'):'');
+ const dd=diffDays(today(),nx.day);return dd===1?'demain':'dans '+dd+' jours'}
+function tToday(t){
+ const d0=today(),ds=days(t),inTrip=d0>=t.start&&d0<=t.end,before=d0<t.start;loadWx(t);autoRate(t);
+ const nx=nextUp(t);let h='';
+ if(before){const n=diffDays(d0,t.start),todo=items(t,'todo'),left=todo.filter(x=>!x.done).length;
+  h+=`<div class="card hero"><div class="sub">Départ pour ${esc(t.dest)}</div><div class="cd">${n===1?'Demain!':n+' jours'}</div><div class="sub">${n===1?'C’est le grand départ.':'avant le départ, le '+esc(fmtLong(t.start))}</div></div>`;
+  h+=wxCard(t);
+  h+=`<button class="card row" data-act="tab" data-v="prep" style="width:100%;text-align:left;font:inherit;color:inherit;cursor:pointer"><span class="ico">${I.tick}</span><span class="grow"><span class="t1">${todo.length?(left?'Il reste '+left+' chose'+(left>1?'s':'')+' à préparer':'Tout est prêt!'):'Prépare ta liste avant le départ'}</span><span class="sub">Ouvrir l’onglet Préparer</span></span></button>`}
+ else if(inTrip){const i=ds.indexOf(d0);h+=`<div class="card hero"><div class="sub">${esc(new Date().toLocaleDateString('fr-CA',{weekday:'long',day:'numeric',month:'long'}))}</div><div class="cd">Jour ${i+1} <span style="font-size:20px;opacity:.7">sur ${ds.length}</span></div></div>`;h+=wxCard(t)}
+ else{const tot=spent(t),st=settle(balances(t));
+  h+=`<div class="card hero"><div class="sub">Voyage terminé</div><div class="cd">${money(tot,t.home)}</div><div class="sub">dépensés à ${t.people.length} · ${st.length?st.length+' remboursement'+(st.length>1?'s':'')+' à faire':'tout le monde est quitte'}</div></div>
+<button class="btn full dark" data-act="gobal">Voir qui doit quoi</button>`}
+ if(nx&&!(d0>t.end))h+=`<div class="card nx"><div class="sub">Prochain rendez-vous · <b style="color:var(--sun)">${esc(untilTxt(nx))}</b></div>
+<div class="row" style="align-items:flex-start;margin-top:6px"><span class="ico${nx.kind==='doc'?'':' s'}">${nx.kind==='doc'?I.plane:I.pin}</span><div class="grow"><div class="t1" style="font-size:17px">${esc(nx.title)}</div>
+<div class="sub">${nx.day===d0?'Aujourd’hui':esc(fmtDay(nx.day))}${nx.time?' à '+esc(nx.time):''}${nx.place?' · '+esc(nx.place):''}</div>${nx.ref?`<div style="margin-top:4px"><span class="code">${esc(nx.ref)}</span></div>`:''}</div></div>
+${nx.where?`<a class="btn sm full" style="margin-top:10px" href="${esc(gmaps(nx.where))}" target="_blank" rel="noopener">${I.pin}Y aller</a>`:''}</div>`;
+ if(inTrip){const acts=items(t,'act').filter(a=>a.day===d0).sort((a,b)=>(a.time||'99').localeCompare(b.time||'99'));
+  const exp=items(t,'exp').filter(e=>e.date===d0),sp=exp.reduce((s,e)=>s+expHome(t,e),0),b=balances(t),mine=ME[t.id]?b[ME[t.id]]||0:null;
+  h+=`<div class="card"><div class="row" style="justify-content:space-between"><h2>Programme du jour</h2><button class="btn sm" data-act="newact" data-day="${d0}" style="min-height:36px;padding:0 10px">+ Ajouter</button></div>
+${acts.length?acts.map(a=>`<div class="it${a.done?' done':''}"><button class="chk" data-act="tdone" data-id="${esc(a.id)}" aria-pressed="${!!a.done}" aria-label="Marquer « ${esc(a.title)} » comme fait">${a.done?I.check:''}</button><button class="main" data-act="editact" data-id="${esc(a.id)}"><span class="time">${esc(a.time||'—')}</span><span class="grow"><span class="t1">${esc(a.title)}</span>${a.place?`<span class="sub">${esc(a.place)}</span>`:''}</span></button></div>`).join(''):`<div class="sub" style="padding-top:8px">Journée libre! Ajoute une activité si l’envie te prend.</div>`}</div>
+<div class="stats"><div class="card stat"><div class="big-n">${money(sp,t.home)}</div><div class="sub">dépensés aujourd’hui</div></div><button class="card stat" data-act="gobal" style="text-align:left;font:inherit;color:inherit;cursor:pointer"><div class="big-n ${mine>0?'pos':mine<0?'neg':''}">${mine===null?'—':money(Math.abs(mine),t.home)}</div><div class="sub">${mine===null?'choisis ton prénom':mine>0?'on te doit':mine<0?'tu dois':'tu es quitte'}</div></button></div>`}
+ return h}
+
 function trip(t){
  watch(t.id);
- const tabs=[['plan','Programme'],['map','Carte'],['money','Argent'],['prep','Préparer']];
- const body={plan:tPlan,map:tMap,money:tMoney,prep:tPrep}[V.tab](t);
- const fab={plan:['newact','Ajouter une activité'],money:['newexp','Ajouter une dépense']}[V.tab];
+ if(!V.tab)V.tab='today';
+ const tabs=[['today','Aujourd’hui'],['plan','Jours'],['map','Carte'],['money','Argent'],['prep','Préparer']];
+ const body={today:tToday,plan:tPlan,map:tMap,money:tMoney,prep:tPrep}[V.tab](t);
+ const fab={today:today()<=t.end?['newexp','J’ai payé quelque chose']:null,plan:['newact','Ajouter une activité'],money:['newexp','Ajouter une dépense']}[V.tab];
  const b=balances(t),mine=ME[t.id]?b[ME[t.id]]||0:null;
  return `<div class="band"><div class="bin"><div class="bandrow"><a class="btn sm onband" href="#" aria-label="Retour aux voyages">${I.back}Voyages</a><span class="row" style="gap:8px"><button class="btn sm onband" data-act="invite">Inviter</button><button class="btn sm onband" data-act="settings" aria-label="Réglages du voyage" style="width:44px;padding:0">${I.gear}</button></span></div>
 <h1>${esc(t.name)}</h1><p class="tag">${esc(t.dest)} · ${esc(fmtLong(t.start))} au ${esc(fmtLong(t.end))} · ${t.people.length} voyageur${t.people.length>1?'s':''}</p>
@@ -264,7 +338,10 @@ ${x.people.map((p,i)=>`<input type="text" class="inp" data-pp="${i}" value="${es
 <button type="button" class="btn sm" data-act="morep">Ajouter une personne</button>
 <div class="two"><label class="f">Ta monnaie<select data-k="home">${CURS.map(c=>`<option value="${c[0]}" ${c[0]===x.home?'selected':''}>${c[0]} – ${c[1]}</option>`).join('')}</select></label>
 <label class="f">Monnaie sur place<select data-k="cur">${CURS.map(c=>`<option value="${c[0]}" ${c[0]===x.cur?'selected':''}>${c[0]} – ${c[1]}</option>`).join('')}</select></label></div>
-${x.cur!==x.home?`<label class="f">Taux : 1 ${esc(x.cur)} vaut combien de ${esc(x.home)}?<input type="text" inputmode="decimal" data-k="rateTxt" value="${esc(x.rateTxt)}" placeholder="Ex. : 1,50"><span class="sub" style="font-weight:400">Cherche « 1 ${esc(x.cur)} en ${esc(x.home)} » sur Google. Tu pourras le changer plus tard.</span></label>`:''}
+${x.cur!==x.home?`<div class="card stack" style="padding:14px;gap:10px;background:var(--bg)"><label class="f">Taux : 1 ${esc(x.cur)} = combien de ${esc(x.home)}?<input type="text" inputmode="decimal" data-k="rateTxt" value="${esc(x.rateTxt)}" placeholder="Ex. : 1,50"></label>
+${s.rateMsg?`<div class="sub">${esc(s.rateMsg)}</div>`:''}<button type="button" class="btn sm" data-act="getrate">Obtenir le taux du jour</button>
+<label class="ck"><input type="checkbox" data-chk="rateAuto" ${x.rateAuto!==false?'checked':''}>Mettre à jour le taux automatiquement chaque jour</label>
+<div class="sub">Chaque dépense garde le taux du jour où elle a été ajoutée : les comptes déjà faits ne bougent pas.</div></div>`:''}
 <label class="f">Budget total du groupe (${esc(x.home)}, optionnel)<input type="text" inputmode="decimal" data-k="budTxt" value="${esc(x.budTxt)}" placeholder="Ex. : 4000"></label>
 ${err}<button class="btn pri" type="submit">${s.isNew?'Créer le voyage':'Enregistrer'}</button>
 ${s.isNew?'':`<button type="button" class="btn" data-act="leave">Retirer de mon téléphone</button><button type="button" class="btn danger" data-act="deltrip">Supprimer pour tout le monde</button>`}${cancel}`)}
@@ -323,12 +400,12 @@ const fmtIn=c=>(c/100).toFixed(2).replace('.',',');
 /* ---------- Ouvrir les formulaires ---------- */
 function openTrip(t){const d=today();
  V.sheet={type:'trip',isNew:!t,x:t?{...t,people:t.people.map(p=>({...p})),rateTxt:String(t.rate||'').replace('.',','),budTxt:t.budget?fmtIn(t.budget):''}
-  :{id:secretId(),name:'',dest:'',start:addDays(d,30),end:addDays(d,37),people:[{id:uid(),name:''},{id:uid(),name:''}],home:'CAD',cur:'CAD',rateTxt:'',budTxt:'',created:Date.now()}};paintSheet()}
+  :{id:secretId(),name:'',dest:'',start:addDays(d,30),end:addDays(d,37),people:[{id:uid(),name:''},{id:uid(),name:''}],home:'CAD',cur:'CAD',rateTxt:'',budTxt:'',rateAuto:true,created:Date.now()}};paintSheet()}
 function openAct(a,day){const t=curT();V.sheet={type:'act',isNew:!a,x:a?{...a,costTxt:a.cost?fmtIn(a.cost):''}:{id:uid(),type:'act',title:'',day:day??(today()>=t.start&&today()<=t.end?today():t.start),time:'',place:'',note:'',costTxt:'',done:false,t:Date.now()}};paintSheet()}
 function openDoc(x){V.sheet={type:'doc',isNew:!x,x:x?{...x}:{id:uid(),type:'doc',kind:'vol',title:'',date:'',time:'',ref:'',addr:'',note:'',t:Date.now()}};paintSheet()}
 function openExp(e){const t=curT();
  if(e&&e.type==='pay'){V.sheet={type:'pay',x:e};return paintSheet()}
- V.sheet={type:'exp',isNew:!e,x:e?{...e,amtTxt:fmtIn(e.amount),split:(e.split||t.people.map(p=>p.id)).slice(),partsTxt:Object.fromEntries(Object.entries(e.parts||{}).map(([k,v])=>[k,fmtIn(v)]))}
+ V.sheet={type:'exp',isNew:!e,x:e?{...e,origCur:e.cur,amtTxt:fmtIn(e.amount),split:(e.split||t.people.map(p=>p.id)).slice(),partsTxt:Object.fromEntries(Object.entries(e.parts||{}).map(([k,v])=>[k,fmtIn(v)]))}
   :{id:uid(),type:'exp',amtTxt:'',cur:t.cur,desc:'',cat:'food',by:ME[t.id]||t.people[0].id,date:(today()>=t.start&&today()<=t.end)?today():today(),mode:'eq',split:t.people.map(p=>p.id),partsTxt:{},t:Date.now()}};paintSheet()}
 
 /* ---------- Enregistrer ---------- */
@@ -348,9 +425,9 @@ function submitSheet(){const s=V.sheet,t=curT(),x=s.x,bad=m=>{s.err=m;paintSheet
   let budget=0;if(x.budTxt.trim()){budget=parseAmt(x.budTxt);if(!(budget>0))return bad('Le budget doit être un montant valide.')}
   if(!s.isNew&&t){const used=new Set();(St.items[t.id]||[]).forEach(i=>{if(i.by)used.add(i.by);if(i.to)used.add(i.to);(i.split||[]).forEach(p=>used.add(p));Object.keys(i.parts||{}).forEach(p=>used.add(p))});
    const gone=t.people.filter(p=>!people.some(q=>q.id===p.id)&&used.has(p.id));if(gone.length)return bad(gone[0].name+' a des dépenses : on ne peut pas le retirer du voyage.')}
-  const trip={id:x.id,name:x.name.trim(),dest:x.dest.trim(),start:x.start,end:x.end,people,home:x.home,cur:x.cur,rate,budget,created:x.created||Date.now()};if(x.geo&&x.geo===trip.dest){trip.geo=x.geo;trip.lat=x.lat;trip.lng=x.lng}
+  const trip={id:x.id,name:x.name.trim(),dest:x.dest.trim(),start:x.start,end:x.end,people,home:x.home,cur:x.cur,rate,rateAuto:x.rateAuto!==false,rateDate:x.rateDate||today(),budget,created:x.created||Date.now()};if(x.geo&&x.geo===trip.dest){trip.geo=x.geo;trip.lat=x.lat;trip.lng=x.lng}
   if(s.isNew)ME[trip.id]=people[0].id,saveMe();
-  V.sheet=null;paintSheet();Save.trip(trip);locateTrip(trip);if(s.isNew){V.tab='plan';location.hash='t-'+trip.id;setTimeout(()=>{V.sheet={type:'invite',link:inviteLink(trip)};paintSheet()},350)}else toast('Voyage mis à jour.');return}
+  V.sheet=null;paintSheet();Save.trip(trip);locateTrip(trip);if(s.isNew){V.tab=null;location.hash='t-'+trip.id;setTimeout(()=>{V.sheet={type:'invite',link:inviteLink(trip)};paintSheet()},350)}else toast('Voyage mis à jour.');return}
  if(s.type==='act'){
   if(!x.title.trim())return bad('Écris le nom de l’activité.');
   let cost=0;if(x.costTxt.trim()){cost=parseAmt(x.costTxt);if(isNaN(cost)||cost<0)return bad('Le coût doit être un montant valide.')}
@@ -363,7 +440,7 @@ function submitSheet(){const s=V.sheet,t=curT(),x=s.x,bad=m=>{s.err=m;paintSheet
  if(s.type==='exp'){
   const c=parseAmt(x.amtTxt);if(!(c>0))return bad('Entre un montant plus grand que 0.');if(c>=1e10)return bad('Ce montant est trop élevé.');
   if(!x.desc.trim())return bad('Écris à quoi correspond la dépense.');
-  const it={id:x.id,type:'exp',amount:c,cur:x.cur,desc:x.desc.trim(),cat:x.cat,by:x.by,date:x.date||today(),mode:x.mode,t:x.t||Date.now()};
+  const it={id:x.id,type:'exp',amount:c,cur:x.cur,desc:x.desc.trim(),cat:x.cat,by:x.by,date:x.date||today(),mode:x.mode,t:x.t||Date.now()};if(x.cur!==t.home)it.rate=(x.rate&&x.cur===x.origCur)?x.rate:(t.rate||1);
   if(x.mode==='exact'){const parts={};let sum=0;for(const p of t.people){const v=parseAmt(x.partsTxt[p.id]||'0');if(isNaN(v)||v<0)return bad('Une des parts n’est pas un montant valide.');if(v>0){parts[p.id]=v;sum+=v}}
    if(sum!==c)return bad('La somme des parts ('+money(sum,x.cur)+') doit égaler le montant ('+money(c,x.cur)+').');it.parts=parts}
   else{if(!x.split.length)return bad('Choisis au moins une personne.');it.split=x.split.slice()}
@@ -379,7 +456,8 @@ document.addEventListener('input',e=>{const s=V.sheet,el=e.target;if(!s||!el.clo
  else if(el.dataset.part)x.partsTxt[el.dataset.part]=el.value;
  const l=$('#left');if(l)l.textContent=leftTxt()});
 document.addEventListener('change',e=>{const s=V.sheet,el=e.target;if(!s||!el.closest('.sheet'))return;const x=s.x;
- if(el.dataset.k){x[el.dataset.k]=el.value;if(s.type==='trip'&&(el.dataset.k==='cur'||el.dataset.k==='home'))paintSheet()}
+ if(el.dataset.chk){x[el.dataset.chk]=el.checked}
+ else if(el.dataset.k){x[el.dataset.k]=el.value;if(s.type==='trip'&&(el.dataset.k==='cur'||el.dataset.k==='home')){s.rateMsg='';paintSheet();sheetRate()}}
  else if(el.dataset.sp)x.split=el.checked?[...new Set([...x.split,el.dataset.sp])]:x.split.filter(i=>i!==el.dataset.sp);
  if(s.type==='exp'&&el.dataset.k==='cur')paintSheet();
  const l=$('#left');if(l)l.textContent=leftTxt()});
@@ -409,6 +487,8 @@ document.addEventListener('click',async e=>{const b=e.target.closest('[data-act]
  else if(a==='invite'){const link=inviteLink(t);if(navigator.share){try{await navigator.share({title:'Escale – '+t.name,text:'Rejoins notre voyage « '+t.name+' » sur Escale :',url:link});return}catch(err){if(err&&err.name==='AbortError')return}}
   let ok=false;try{await navigator.clipboard.writeText(link);ok=true}catch(err){}V.sheet={type:'invite',link,copied:ok};paintSheet()}
  else if(a==='copylink'){let ok=false;try{await navigator.clipboard.writeText(V.sheet.link);ok=true}catch(err){}V.sheet.copied=ok;paintSheet();if(!ok)toast('Copie impossible : sélectionne le lien à la main.')}
+ else if(a==='getrate')sheetRate();
+ else if(a==='gobal'){V.tab='money';V.sub='bal';render();scrollTo(0,0)}
  else if(a==='newme'){V.sheet={type:'me'};paintSheet()}
  else if(a==='leave'){V.sheet={type:'leave'};paintSheet()}
  else if(a==='leaveok'){const tid=t.id;V.sheet=null;paintSheet();forget(tid);location.hash='';render()}
@@ -423,7 +503,7 @@ document.addEventListener('click',async e=>{const b=e.target.closest('[data-act]
 document.addEventListener('keydown',e=>{if(e.key==='Escape'&&V.sheet){V.sheet=null;paintSheet()}});
 function handleHash(){const h=location.hash.slice(1);if(h.startsWith('join-')){const id=h.slice(5).replace(/[^a-z0-9]/gi,'');if(id.length>=16){addMine(id);watch(id);location.replace('#t-'+id);return true}}return false}
 window.addEventListener('online',()=>{St.offline=false;render()});window.addEventListener('offline',()=>{St.offline=true;render()});
-window.addEventListener('hashchange',()=>{if(handleHash())return;V.tab='plan';V.sub='list';V.sheet=null;paintSheet();render();scrollTo(0,0)});
+window.addEventListener('hashchange',()=>{if(handleHash())return;V.tab=null;V.sub='list';V.sheet=null;paintSheet();render();scrollTo(0,0)});
 
 window.__escaleOK=true;
 if('serviceWorker' in navigator&&location.protocol==='https:')navigator.serviceWorker.register('sw.js').catch(()=>{});
